@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ce-gov · policy dashboard</title>
+  <link rel="stylesheet" href="./policy.css" />
+</head>
+<body>
+  <header>
+    <h1>ce-gov<span class="tag">operator policy dashboard</span></h1>
+    <div class="toolbar">
+      <span class="status-pill"><span id="conn-dot" class="dot"></span><span id="conn-text">init</span></span>
+      <input id="base-input" type="text" spellcheck="false"
+             placeholder="http://localhost:8844" aria-label="CE node API base URL" />
+      <button id="connect-btn" type="button">connect</button>
+      <button id="refresh-btn" type="button">refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="err" class="err-banner"></div>
+
+    <!-- LEFT: active policy set + Guardian export -->
+    <section id="policy-panel" class="panel">
+      <div class="panel-head">
+        <h2>Active policy set</h2>
+        <span class="sub">policy.js · enacted verdicts</span>
+        <span id="policy-count" class="count"></span>
+      </div>
+      <div id="set-bar" class="set-bar"></div>
+      <div class="panel-body">
+        <div id="policy-list"></div>
+        <div class="guard-export">
+          <div class="gx-head">
+            Guardian export candidate (banned_categories)
+            <button id="copy-guard" class="copy-btn" type="button">copy</button>
+          </div>
+          <pre id="guard-json">{}</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- TOP RIGHT: pre-run scan verdict log -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Pre-run scan log</h2>
+        <span class="sub">scan.js · verdict cache (this policy set)</span>
+        <span id="scan-count" class="count"></span>
+      </div>
+      <div id="scan-list" class="panel-body"></div>
+    </section>
+
+    <!-- BOTTOM RIGHT: runtime abuse-report feed -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Abuse-report feed</h2>
+        <span class="sub">monitor.js · signed runtime evidence + karma impact</span>
+        <span id="report-count" class="count"></span>
+      </div>
+      <div id="report-list" class="panel-body"></div>
+    </section>
+
+    <div id="foot" class="foot"></div>
+  </main>
+
+  <script type="module" src="./policy.js"></script>
+</body>
+</html>

@@ -1,0 +1,938 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ce-gov — expert deliberation</title>
+<style>
+  /* ---- dark technical theme; no rounded-toy look, no emoji ---- */
+  :root {
+    --bg: #0b0e13;
+    --panel: #121722;
+    --panel-2: #161c29;
+    --line: #232c3d;
+    --line-soft: #1a212e;
+    --fg: #d7dee9;
+    --fg-dim: #8a96a8;
+    --fg-faint: #5d6878;
+    --accent: #4ea1ff;
+    --pro: #3fb27f;       /* proof / for */
+    --pro-bg: #0f1f18;
+    --con: #e0584f;       /* antiproof / against */
+    --con-bg: #1f1311;
+    --warn: #d8a23a;
+    --ok: #3fb27f;
+    --bad: #e0584f;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: var(--mono); }
+  button {
+    font-family: var(--sans);
+    background: var(--panel-2);
+    color: var(--fg);
+    border: 1px solid var(--line);
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: #15314f; border-color: #2b5e93; color: #cfe4ff; }
+  button.primary:hover { background: #1a3c63; }
+  input, textarea, select {
+    font-family: var(--sans);
+    background: #0d121b;
+    color: var(--fg);
+    border: 1px solid var(--line);
+    padding: 7px 9px;
+    font-size: 13px;
+    width: 100%;
+  }
+  textarea { resize: vertical; min-height: 80px; font-family: var(--sans); }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  label { display: block; font-size: 12px; color: var(--fg-dim); margin: 10px 0 4px; letter-spacing: .02em; }
+
+  /* ---- top bar ---- */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 18px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #0e131c, #0b0e13);
+    position: sticky; top: 0; z-index: 20;
+  }
+  header .brand { font-weight: 600; letter-spacing: .04em; }
+  header .brand b { color: var(--accent); }
+  header .brand span { color: var(--fg-faint); font-weight: 400; font-size: 12px; margin-left: 8px; }
+  header .spacer { flex: 1; }
+  .pill {
+    font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--line); padding: 3px 8px; color: var(--fg-dim);
+    background: var(--panel);
+  }
+  .pill b { color: var(--fg); font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: middle; }
+  .dot.up { background: var(--ok); } .dot.down { background: var(--bad); } .dot.idle { background: var(--fg-faint); }
+
+  /* ---- layout ---- */
+  main { max-width: 1180px; margin: 0 auto; padding: 18px; }
+  .row { display: flex; gap: 18px; align-items: flex-start; }
+  .muted { color: var(--fg-dim); }
+  .faint { color: var(--fg-faint); }
+  .nowrap { white-space: nowrap; }
+
+  /* ---- proposal list ---- */
+  .list-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .list-head h2 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  .list-head .spacer { flex: 1; }
+  .prop-card {
+    border: 1px solid var(--line); background: var(--panel);
+    padding: 14px 16px; margin-bottom: 10px; cursor: pointer;
+  }
+  .prop-card:hover { border-color: #33425c; background: var(--panel-2); }
+  .prop-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .prop-card .meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--fg-dim); margin-top: 8px; }
+  .tag { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line-soft); padding: 1px 6px; color: var(--fg-dim); }
+  .tag.deny { color: #f0a39c; border-color: #4a2723; }
+  .tag.allow { color: #9ad9bb; border-color: #234a39; }
+
+  .state-badge { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border: 1px solid var(--line); }
+  .state-open { color: var(--accent); border-color: #2b5e93; }
+  .state-closed { color: var(--warn); border-color: #4a3c1c; }
+  .state-enacted { color: var(--ok); border-color: #234a39; }
+  .state-superseded { color: var(--fg-faint); }
+
+  /* ---- detail ---- */
+  .back { font-size: 12px; color: var(--fg-dim); cursor: pointer; }
+  .back:hover { color: var(--accent); }
+  .detail-head { border: 1px solid var(--line); background: var(--panel); padding: 18px; margin: 12px 0 16px; }
+  .detail-head h1 { margin: 0 0 6px; font-size: 20px; font-weight: 650; }
+  .detail-head .statement { color: var(--fg); margin: 6px 0 0; }
+  .detail-head .sub { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+
+  /* verdict banner */
+  .verdict {
+    border: 1px solid; padding: 12px 16px; margin: 0 0 16px; font-size: 14px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .verdict.pass { background: var(--pro-bg); border-color: #275c44; color: #b7e6cd; }
+  .verdict.fail { background: var(--con-bg); border-color: #5c2b27; color: #f0bcb6; }
+  .verdict .big { font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 13px; }
+  .verdict .mono { color: inherit; opacity: .85; font-size: 12px; }
+
+  /* tally bar */
+  .tally { border: 1px solid var(--line); background: var(--panel); padding: 14px 16px; margin-bottom: 16px; }
+  .tally .nums { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 8px; }
+  .tally .nums .for { color: var(--pro); } .tally .nums .against { color: var(--con); }
+  .bar { height: 10px; background: var(--con); border: 1px solid var(--line); display: flex; overflow: hidden; }
+  .bar .fill { height: 100%; background: var(--pro); transition: width .3s; }
+  .progress-line { display: flex; gap: 18px; margin-top: 10px; font-size: 11px; color: var(--fg-dim); flex-wrap: wrap; }
+  .progress-line .met { color: var(--ok); } .progress-line .unmet { color: var(--fg-faint); }
+  .meter { display: inline-block; width: 90px; height: 6px; background: var(--line); vertical-align: middle; margin: 0 6px; }
+  .meter > i { display: block; height: 100%; background: var(--accent); }
+
+  /* columns */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 820px) { .cols { grid-template-columns: 1fr; } }
+  .col { border: 1px solid var(--line); background: var(--panel); }
+  .col-head { padding: 10px 14px; border-bottom: 1px solid var(--line); font-weight: 600; font-size: 13px; letter-spacing: .03em; display:flex; align-items:center; gap:8px; }
+  .col.pro .col-head { color: var(--pro); }
+  .col.con .col-head { color: var(--con); }
+  .col-head .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+
+  .arg { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
+  .arg:last-child { border-bottom: none; }
+  .arg .body { white-space: pre-wrap; }
+  .arg .arg-meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; font-size: 11px; }
+  .arg .sources { margin: 8px 0 0; padding: 0; list-style: none; }
+  .arg .sources li { font-size: 12px; margin: 3px 0; display: flex; gap: 6px; align-items: baseline; }
+  .arg .sources .trust { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); border: 1px solid var(--line-soft); padding: 0 4px; }
+
+  .badge { font-family: var(--mono); font-size: 10px; padding: 1px 6px; border: 1px solid var(--line); color: var(--fg-dim); }
+  .badge.ok { color: var(--ok); border-color: #234a39; }
+  .badge.bad { color: var(--bad); border-color: #4a2723; }
+  .badge.warn { color: var(--warn); border-color: #4a3c1c; }
+  .badge.ai { color: #b79bff; border-color: #382a5e; }
+
+  /* vote control */
+  .vote { display: inline-flex; align-items: center; border: 1px solid var(--line); }
+  .vote button { border: none; background: transparent; padding: 2px 8px; font-family: var(--mono); }
+  .vote button.up:hover { color: var(--pro); }
+  .vote button.down:hover { color: var(--con); }
+  .vote .score { padding: 0 8px; font-family: var(--mono); font-size: 12px; min-width: 34px; text-align: center; color: var(--fg-dim); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+  .vote button.cast-up { color: var(--pro); }
+  .vote button.cast-down { color: var(--con); }
+  .author { font-family: var(--mono); font-size: 11px; color: var(--fg-faint); }
+  .ts { font-size: 11px; color: var(--fg-faint); }
+
+  /* forms */
+  .form-card { border: 1px solid var(--line); background: var(--panel-2); padding: 16px; margin-top: 16px; }
+  .form-card h3 { margin: 0 0 4px; font-size: 14px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); margin-top: 4px; }
+  .seg button { border: none; background: transparent; }
+  .seg button.active.pro { background: var(--pro-bg); color: var(--pro); }
+  .seg button.active.con { background: var(--con-bg); color: var(--con); }
+  .src-row { display: flex; gap: 8px; margin-top: 6px; align-items: center; }
+  .src-row input.url { flex: 2; } .src-row input.title { flex: 2; } .src-row input.trust { flex: 0 0 70px; }
+  .src-row button { flex: 0 0 auto; }
+  .form-actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
+  .err { color: var(--bad); font-size: 12px; }
+  .hint { color: var(--fg-faint); font-size: 11px; margin-top: 4px; }
+
+  .empty { color: var(--fg-faint); padding: 22px; text-align: center; font-size: 13px; }
+  .spin { color: var(--fg-dim); padding: 22px; text-align: center; }
+
+  .toast { position: fixed; bottom: 16px; right: 16px; z-index: 50; display: flex; flex-direction: column; gap: 8px; }
+  .toast .t { border: 1px solid var(--line); background: var(--panel-2); padding: 9px 14px; font-size: 12px; max-width: 360px; }
+  .toast .t.ok { border-color: #234a39; } .toast .t.bad { border-color: #4a2723; color: #f0bcb6; }
+
+  details.modal-form > summary { cursor: pointer; color: var(--accent); font-size: 13px; list-style: none; }
+  details.modal-form > summary::-webkit-details-marker { display: none; }
+  details.modal-form > summary:before { content: "+ "; }
+  details.modal-form[open] > summary:before { content: "− "; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px){ .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>ce</b>-gov <span>expert deliberation &middot; policy &amp; governance</span></div>
+  <div class="spacer"></div>
+  <div class="pill" id="pol-pill" title="active policy set id">policy set <b id="pol-id">—</b></div>
+  <div class="pill" id="height-pill"><span class="dot idle" id="conn-dot"></span>height <b id="height">—</b></div>
+  <div class="pill" id="wallet-pill" title="this browser identity (demo wallet)">id <b id="wallet-id">—</b></div>
+</header>
+
+<main id="app">
+  <div class="spin">loading…</div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script type="module">
+// ---------------------------------------------------------------------------
+// Imports — the governance modules. All logic lives there; this file is view-only.
+// ---------------------------------------------------------------------------
+import { CeClient, signalBlobStore, CeError } from "../src/ce.js";
+import {
+  Amount, KIND, ARG_KIND, VOTE_DIR, DECISION, STATE,
+  canonical, toHex, sha256Hex,
+} from "../src/types.js";
+import {
+  createProposal, addArgument, loadProposal, loadArguments,
+  listProposals, isOpen, lifecycleState, verifyArtifact,
+} from "../src/proposals.js";
+import {
+  castVote, tally, finalizeVerdict, quadWeight, TALLY,
+} from "../src/voting.js";
+import { profile, computeKarma, rawWeight } from "../src/reputation.js";
+import { activePolicySet, categoryDecision } from "../src/policy.js";
+import { validateArgument, makeValidatorLlm } from "../src/validator.js";
+
+// ---------------------------------------------------------------------------
+// Browser wallet — a real Ed25519 keypair via Web Crypto, persisted in
+// localStorage. `author` (node id) is sha256(pubkey) -> 64-hex, plausible node id.
+// `signer(payload)` returns a 128-hex Ed25519 signature so artifacts validate.
+// In production this seam is replaced by the node's ce-cap wallet; the UI only
+// needs an async (payload)=>128hex signer and a 64-hex author.
+// ---------------------------------------------------------------------------
+const Wallet = (() => {
+  let keys = null, author = null, pubRaw = null;
+  const enc = new TextEncoder();
+  async function load() {
+    const stored = localStorage.getItem("ce-gov-wallet");
+    if (stored) {
+      try {
+        const j = JSON.parse(stored);
+        const priv = await crypto.subtle.importKey("jwk", j.priv, { name: "Ed25519" }, true, ["sign"]);
+        const pub = await crypto.subtle.importKey("jwk", j.pub, { name: "Ed25519" }, true, ["verify"]);
+        keys = { privateKey: priv, publicKey: pub };
+      } catch { keys = null; }
+    }
+    if (!keys) {
+      keys = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+      const priv = await crypto.subtle.exportKey("jwk", keys.privateKey);
+      const pub = await crypto.subtle.exportKey("jwk", keys.publicKey);
+      localStorage.setItem("ce-gov-wallet", JSON.stringify({ priv, pub }));
+    }
+    pubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey));
+    author = await sha256Hex(pubRaw); // 64-hex node-id-shaped identity
+  }
+  async function sign(payload) {
+    const sig = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, keys.privateKey, enc.encode(payload)));
+    return toHex(sig); // 128-hex
+  }
+  return {
+    async init() { await load(); return author; },
+    get author() { return author; },
+    sign,
+  };
+})();
+
+// Signature verifier injected into tally/verifyArtifact. The wallet pubkey is not
+// resolvable from author alone here (author = hash(pub)), so for this UI we accept
+// any well-formed 128-hex signature on a recomputed-id artifact (integrity check),
+// matching the foundation's "allowUnsigned"-style local trust. The node-side
+// deployment swaps in real ce-cap verification.
+async function verifySig(_payload, sig /*, author */) {
+  return typeof sig === "string" && /^[0-9a-f]{128}$/.test(sig);
+}
+
+// ---------------------------------------------------------------------------
+// CE client + validator + state
+// ---------------------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const ce = new CeClient({ base: params.get("api") || undefined });
+ce.blobStore = signalBlobStore(ce); // governance artifacts persist as CEP-1 signal payloads
+
+// Evidence validator adapter. validator.js exposes validateArgument() (deterministic
+// hard layer + optional LLM escalation). voting.js's tally() and the UI badges both
+// want a `verifyEvidence(arg) -> {supported, sourceTrust, confidence}` / `available()`
+// shape, so we adapt here. The LLM backend auto-enables when ANTHROPIC_API_KEY is set
+// (claude-opus-4-8); otherwise it degrades to deterministic-only. Browser passes a key
+// only via ?api_key= for local testing; in production this runs server/node-side.
+const llm = makeValidatorLlm({
+  backend: params.get("ai") ? "claude" : "none",
+  apiKey: params.get("api_key") || undefined,
+  model: "claude-opus-4-8",
+});
+const validator = {
+  available() { return !!(llm && llm.available()); },
+  async verifyEvidence(arg) {
+    const r = await validateArgument(arg, { llm });
+    let trust = 0;
+    for (const sv of r.sourceVerdicts || []) trust = Math.max(trust, sv.trust | 0);
+    return { supported: !!r.ok, sourceTrust: trust, confidence: r.score | 0, deterministic: !!r.deterministic };
+  },
+};
+const INDEX_TAG = "ce-gov-index-v1"; // must match proposals.js discovery format
+
+const state = {
+  height: 0,
+  policySet: null,
+  view: { name: "list" },          // {name:'list'} | {name:'detail', id}
+  proposals: [],
+  // per-proposal cache: { proposal, args, votes, verdict, tally }
+  cache: new Map(),
+  busy: false,
+};
+
+// ---------------------------------------------------------------------------
+// Vote + verdict discovery. proposals.js broadcasts index signals for proposals
+// and arguments, but voting.js only blob-stores votes/verdicts. So the UI both
+// (a) broadcasts an index signal when it casts a vote / finalizes a verdict, and
+// (b) scans signals for those index entries to rebuild tallies. The tag + shape
+// match proposals.js exactly (kind ∈ {vote,verdict}); its scanners ignore them.
+// ---------------------------------------------------------------------------
+async function announceArtifact(artifact, extra = {}) {
+  const bytes = new TextEncoder().encode(JSON.stringify(artifact));
+  const cid = await ce.putBlob(bytes);               // signalBlobStore broadcasts the blob itself
+  const idx = { tag: INDEX_TAG, kind: artifact.kind, id: artifact.id, cid, ...extra };
+  const idxHex = toHex(new TextEncoder().encode(canonical(idx)));
+  try { await ce.signalsSend({ payload_hex: idxHex, to: "broadcast" }); } catch {}
+  return cid;
+}
+
+async function scanArtifacts(kind, predicate) {
+  let signals = [];
+  try { signals = await ce.signals(); } catch { return []; }
+  const cids = new Set();
+  const dec = new TextDecoder();
+  for (const s of signals) {
+    if (!s || !s.payload_hex) continue;
+    let obj;
+    try { obj = JSON.parse(dec.decode(hexToBytes(s.payload_hex))); } catch { continue; }
+    if (obj && obj.tag === INDEX_TAG && obj.kind === kind && typeof obj.cid === "string") {
+      if (!predicate || predicate(obj)) cids.add(obj.cid);
+    }
+  }
+  const out = [], seen = new Set();
+  for (const cid of cids) {
+    const bytes = await ce.getBlob(cid);
+    if (!bytes) continue;
+    let art;
+    try { art = JSON.parse(dec.decode(bytes)); } catch { continue; }
+    if (!art || art.kind !== kind || !art.id || seen.has(art.id)) continue;
+    if (!(await verifyArtifact(art, verifySig))) continue;
+    seen.add(art.id);
+    out.push(art);
+  }
+  return out;
+}
+
+function loadVotes(proposalId) { return scanArtifacts(KIND.VOTE, (e) => e.proposal_id === proposalId); }
+async function loadVerdict(proposalId) {
+  const vs = await scanArtifacts(KIND.VERDICT, (e) => e.proposal_id === proposalId);
+  vs.sort((a, b) => (b.ts | 0) - (a.ts | 0));
+  return vs[0] || null;
+}
+
+function hexToBytes(hex) {
+  if (typeof hex !== "string" || hex.length % 2) return new Uint8Array();
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Tiny DOM helpers (no framework)
+// ---------------------------------------------------------------------------
+const $ = (sel, root = document) => root.querySelector(sel);
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null) continue;
+    if (k === "class") el.className = v;
+    else if (k === "html") el.innerHTML = v;
+    else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid);
+  }
+  return el;
+}
+const short = (hex, n = 8) => (typeof hex === "string" && hex.length > n + 4 ? hex.slice(0, n) + "…" + hex.slice(-4) : hex || "");
+const fmtCredits = (amt) => { try { return Amount.toCredits(amt); } catch { return "0"; } };
+const ago = (ts) => {
+  const s = Math.max(0, (Date.now() - (ts | 0)) / 1000);
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+};
+function toast(msg, kind = "ok", ms = 3800) {
+  const t = h("div", { class: "t " + kind }, msg);
+  $("#toast").appendChild(t);
+  setTimeout(() => t.remove(), ms);
+}
+
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+async function refreshChain() {
+  try {
+    const st = await ce.status();
+    state.height = (st && st.height) | 0;
+    $("#height").textContent = String(state.height);
+    $("#conn-dot").className = "dot up";
+  } catch {
+    $("#conn-dot").className = "dot down";
+  }
+  try {
+    state.policySet = await activePolicySet(ce);
+    $("#pol-id").textContent = short(state.policySet.id, 6);
+  } catch { /* no policies yet */ }
+}
+
+async function loadList() {
+  state.proposals = await listProposals(ce).catch(() => []);
+}
+
+async function loadDetail(id, { force = false } = {}) {
+  if (!force && state.cache.has(id)) return state.cache.get(id);
+  const proposal = await loadProposal(ce, id);
+  if (!proposal) return null;
+  const [args, votes, verdict] = await Promise.all([
+    loadArguments(ce, id).catch(() => []),
+    loadVotes(id).catch(() => []),
+    loadVerdict(id).catch(() => null),
+  ]);
+  const t = await tally(ce, proposal, votes, args, { allowUnsigned: true, validator }).catch(() => null);
+  const entry = { proposal, args, votes, verdict, tally: t };
+  state.cache.set(id, entry);
+  return entry;
+}
+
+// per-argument community score from votes (damped, for display)
+function argScore(argId, votes) {
+  let net = 0n;
+  for (const v of votes) {
+    if (v.argument_id !== argId) continue;
+    const w = BigInt(quadWeight(v.weight) || "0");
+    net += v.direction === VOTE_DIR.UP ? w : -w;
+  }
+  return net;
+}
+function myVoteFor(targetArgId, proposalId, votes) {
+  // last-write-wins for this wallet
+  let mine = null;
+  for (const v of votes) {
+    if (v.author !== Wallet.author) continue;
+    if ((v.argument_id || null) !== (targetArgId || null)) continue;
+    if (!mine || (v.ts | 0) > (mine.ts | 0)) mine = v;
+  }
+  return mine;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — list
+// ---------------------------------------------------------------------------
+function renderList() {
+  const app = $("#app");
+  app.replaceChildren();
+
+  const head = h("div", { class: "list-head" },
+    h("h2", {}, "Policy proposals"),
+    h("span", { class: "muted faint" }, `${state.proposals.length} known`),
+    h("div", { class: "spacer" }),
+    h("button", { onclick: () => { state.view = { name: "list" }; reload(); } }, "Refresh"),
+    h("button", { class: "primary", onclick: toggleNewProposal }, "New proposal"),
+  );
+  app.appendChild(head);
+
+  app.appendChild(newProposalForm());
+
+  if (!state.proposals.length) {
+    app.appendChild(h("div", { class: "empty" }, "No proposals discovered yet. Create one, or check that a CE node is reachable at the API base."));
+    return;
+  }
+
+  for (const p of state.proposals) {
+    const st = lifecycleState(p, state.height, null);
+    const card = h("div", { class: "prop-card", onclick: () => openDetail(p.id) },
+      h("div", { class: "row", style: "justify-content:space-between;align-items:flex-start" },
+        h("h3", {}, p.title || "(untitled proposal)"),
+        h("span", { class: "state-badge state-" + st }, st),
+      ),
+      h("div", { class: "muted", style: "margin-top:2px" }, p.statement || ""),
+      h("div", { class: "meta" },
+        h("span", { class: "tag " + p.action }, p.action.toUpperCase() + " " + p.category),
+        ...(p.expertise_tags || []).map((t) => h("span", { class: "tag" }, "#" + t)),
+        h("span", { class: "nowrap" }, "closes @ " + p.close_height),
+        h("span", { class: "author nowrap" }, "by " + short(p.author)),
+        h("span", { class: "ts nowrap" }, ago(p.ts)),
+      ),
+    );
+    app.appendChild(card);
+  }
+}
+
+let _showNewProp = false;
+function toggleNewProposal() { _showNewProp = !_showNewProp; renderList(); }
+function newProposalForm() {
+  if (!_showNewProp) return h("div", { style: "display:none" });
+  const f = h("div", { class: "form-card" });
+  const err = h("div", { class: "err" });
+  const title = h("input", { placeholder: "Short title, e.g. Ban hosting of malware C2 servers" });
+  const statement = h("textarea", { placeholder: "The exact rule being proposed and its scope." });
+  const category = h("input", { placeholder: "category id, e.g. malware_c2" });
+  const action = h("select", {}, h("option", { value: "deny" }, "deny (ban)"), h("option", { value: "allow" }, "allow (permit)"));
+  const tags = h("input", { placeholder: "expertise tags, comma-separated, e.g. security, legal" });
+  const window_ = h("input", { type: "number", value: "8640", min: "1" });
+
+  f.append(
+    h("h3", {}, "New policy proposal"),
+    h("div", { class: "hint" }, "Voting opens at the current height and runs for the chosen block window."),
+    h("label", {}, "Title"), title,
+    h("label", {}, "Statement"), statement,
+    h("div", { class: "grid2" },
+      h("div", {}, h("label", {}, "Category id"), category),
+      h("div", {}, h("label", {}, "Action"), action),
+    ),
+    h("div", { class: "grid2" },
+      h("div", {}, h("label", {}, "Expertise tags"), tags),
+      h("div", {}, h("label", {}, "Voting window (blocks)"), window_),
+    ),
+    err,
+    h("div", { class: "form-actions" },
+      h("button", { class: "primary", onclick: submit }, "Publish proposal"),
+      h("button", { onclick: toggleNewProposal }, "Cancel"),
+    ),
+  );
+  async function submit(ev) {
+    err.textContent = "";
+    const t = title.value.trim(), s = statement.value.trim(), c = category.value.trim();
+    if (!t || !s || !c) { err.textContent = "Title, statement and category are required."; return; }
+    const btn = ev.target; btn.disabled = true; btn.textContent = "Publishing…";
+    try {
+      const win = Math.max(1, parseInt(window_.value, 10) || 8640);
+      const p = await createProposal(ce, {
+        title: t, statement: s, category: c, action: action.value,
+        expertise_tags: tags.value.split(",").map((x) => x.trim()).filter(Boolean),
+        author: Wallet.author,
+        open_height: state.height,
+        close_height: state.height + win,
+      }, Wallet.sign);
+      toast("Proposal published: " + short(p.id), "ok");
+      _showNewProp = false;
+      await reload();
+      openDetail(p.id);
+    } catch (e) {
+      err.textContent = "Publish failed: " + (e && e.message || e);
+    } finally { btn.disabled = false; btn.textContent = "Publish proposal"; }
+  }
+  return f;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — detail
+// ---------------------------------------------------------------------------
+async function openDetail(id) {
+  state.view = { name: "detail", id };
+  history.replaceState(null, "", "#" + id);
+  await renderDetail();
+}
+
+async function renderDetail() {
+  const app = $("#app");
+  app.replaceChildren(h("div", { class: "spin" }, "loading proposal…"));
+  const entry = await loadDetail(state.view.id, { force: true });
+  if (!entry) { app.replaceChildren(h("div", { class: "empty" }, "Proposal not found.")); return; }
+  const { proposal: p, args, votes, verdict, tally: t } = entry;
+  const open = isOpen(p, state.height);
+  const st = lifecycleState(p, state.height, verdict);
+
+  app.replaceChildren();
+  app.appendChild(h("div", { class: "back", onclick: () => { state.view = { name: "list" }; history.replaceState(null, "", "#"); renderList(); } }, "← all proposals"));
+
+  // header
+  app.appendChild(h("div", { class: "detail-head" },
+    h("h1", {}, p.title || "(untitled)"),
+    h("div", { class: "statement" }, p.statement || ""),
+    h("div", { class: "sub" },
+      h("span", { class: "state-badge state-" + st }, st),
+      h("span", { class: "tag " + p.action }, p.action.toUpperCase() + " · " + p.category),
+      ...(p.expertise_tags || []).map((tg) => h("span", { class: "tag" }, "#" + tg)),
+      h("span", { class: "muted nowrap" }, `open ${p.open_height} → close ${p.close_height} (now ${state.height})`),
+      h("span", { class: "author nowrap" }, "author " + short(p.author)),
+    ),
+  ));
+
+  // verdict banner (enacted / final)
+  if (verdict) app.appendChild(verdictBanner(verdict, p));
+
+  // tally
+  app.appendChild(tallyView(t, votes, p, open, verdict));
+
+  // proof / antiproof columns
+  const proofs = args.filter((a) => a.arg_kind === ARG_KIND.PROOF);
+  const antiproofs = args.filter((a) => a.arg_kind === ARG_KIND.ANTIPROOF);
+  app.appendChild(h("div", { class: "cols" },
+    column("pro", "PROOF — supports the policy", proofs, votes, p, open),
+    column("con", "ANTI-PROOF — opposes the policy", antiproofs, votes, p, open),
+  ));
+
+  // submit argument
+  if (open) app.appendChild(argumentForm(p));
+  else app.appendChild(h("div", { class: "form-card muted" }, "Voting is closed for this proposal; arguments and votes are locked."));
+
+  // async AI evidence badges (non-blocking)
+  decorateEvidence(args);
+}
+
+function verdictBanner(v, p) {
+  const passed = v.decision === p.action; // decision==action means the proposal passed
+  return h("div", { class: "verdict " + (passed ? "pass" : "fail") },
+    h("span", { class: "big" }, passed ? "ENACTED · " + v.decision.toUpperCase() : "REJECTED · status quo"),
+    h("span", {}, passed
+      ? `Policy "${p.category}" is now ${v.decision} in the active set.`
+      : `Did not clear quorum/supermajority; "${p.category}" remains unchanged.`),
+    h("span", { class: "mono" }, `for ${fmtCredits(v.tally_for)} · against ${fmtCredits(v.tally_against)} · ${v.voter_count} voters`),
+    v.policy_id ? h("span", { class: "mono" }, "policy " + short(v.policy_id, 6)) : null,
+  );
+}
+
+function tallyView(t, votes, p, open, verdict) {
+  const forB = t ? BigInt(t.tally_for) : 0n;
+  const agB = t ? BigInt(t.tally_against) : 0n;
+  const total = forB + agB;
+  const pct = total > 0n ? Number((forB * 10000n) / total) / 100 : 0;
+  const superBps = TALLY.SUPERMAJORITY_BPS / 100;
+  const voters = t ? t.voter_count : 0;
+  const quorumVotersMet = voters >= TALLY.QUORUM_VOTERS;
+  const winning = forB > agB ? forB : agB;
+  const quorumWeightMet = winning >= BigInt(TALLY.QUORUM_WEIGHT);
+  const superMet = total > 0n && (forB * 10000n) / total >= BigInt(TALLY.SUPERMAJORITY_BPS) && forB > agB;
+
+  const wrap = h("div", { class: "tally" },
+    h("div", { class: "nums" },
+      h("span", { class: "for" }, `FOR ${fmtCredits(t ? t.tally_for : "0")} cr`),
+      h("span", { class: "muted" }, `${pct.toFixed(1)}% · need ${superBps}%`),
+      h("span", { class: "against" }, `${fmtCredits(t ? t.tally_against : "0")} cr AGAINST`),
+    ),
+    h("div", { class: "bar", title: pct.toFixed(1) + "% for" }, h("div", { class: "fill", style: `width:${pct}%` })),
+    h("div", { class: "progress-line" },
+      h("span", { class: quorumVotersMet ? "met" : "unmet" }, `voters ${voters}/${TALLY.QUORUM_VOTERS}`),
+      meter("quorum weight", quorumWeightMet ? 100 : (winning > 0n && BigInt(TALLY.QUORUM_WEIGHT) > 0n ? Number((winning * 100n) / BigInt(TALLY.QUORUM_WEIGHT)) : 0)),
+      meter("supermajority", total > 0n ? pct : 0, superBps),
+      h("span", { class: (t && t.quorum_met) ? "met" : "unmet" }, (t && t.quorum_met) ? "quorum MET" : "quorum not met"),
+      h("span", { class: (t && t.passed) ? "met" : "unmet" }, (t && t.passed) ? "PASSING" : "not passing"),
+    ),
+  );
+
+  // direct proposal vote control
+  const mine = myVoteFor(null, p.id, votes);
+  const ctl = h("div", { class: "row", style: "justify-content:space-between;align-items:center;margin-top:12px" },
+    h("span", { class: "muted" }, open ? "Cast your reputation-weighted vote on the proposal:" : "Proposal voting is closed."),
+    h("div", { style: "display:flex;gap:10px;align-items:center" },
+      voteControl(null, p, votes, mine, open),
+      open && !verdict && state.height > p.close_height
+        ? null : null,
+    ),
+  );
+  wrap.appendChild(ctl);
+
+  // finalize verdict action when past close and no verdict yet
+  if (!verdict && state.height > p.close_height) {
+    wrap.appendChild(h("div", { class: "form-actions", style: "margin-top:10px" },
+      h("button", { class: "primary", onclick: (e) => finalize(e, p) }, "Finalize verdict"),
+      h("span", { class: "hint" }, "Past close height — tally and publish the binding verdict."),
+    ));
+  }
+  return wrap;
+}
+function meter(label, pct, markPct) {
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  return h("span", { class: pct >= 100 || (markPct && pct >= markPct) ? "met" : "unmet", title: label },
+    label,
+    h("span", { class: "meter" }, h("i", { style: `width:${clamped}%` })),
+    `${clamped.toFixed(0)}%`,
+  );
+}
+
+function column(kind, label, args, votes, p, open) {
+  const col = h("div", { class: "col " + kind });
+  col.appendChild(h("div", { class: "col-head" }, label, h("span", { class: "count" }, String(args.length))));
+  if (!args.length) col.appendChild(h("div", { class: "empty" }, kind === "pro" ? "No supporting arguments yet." : "No opposing arguments yet."));
+  for (const a of args) col.appendChild(argView(a, votes, p, open));
+  return col;
+}
+
+function argView(a, votes, p, open) {
+  const score = argScore(a.id, votes);
+  const mine = myVoteFor(a.id, p.id, votes);
+  const el = h("div", { class: "arg", id: "arg-" + a.id },
+    h("div", { class: "body" }, a.body || ""),
+    h("ul", { class: "sources" },
+      ...(a.sources || []).map((s) => h("li", {},
+        h("span", { class: "trust" }, "trust " + (s.trust | 0)),
+        h("a", { href: s.url, target: "_blank", rel: "noopener noreferrer" }, s.title || s.url),
+      )),
+    ),
+    h("div", { class: "arg-meta" },
+      voteControl(a.id, p, votes, mine, open, score),
+      h("span", { class: "badge ai", id: "ev-" + a.id, title: "evidence validation" }, "evidence: checking…"),
+      h("span", { class: "author" }, short(a.author)),
+      h("span", { class: "ts" }, ago(a.ts)),
+      h("span", { class: "badge", id: "rep-" + a.author, title: "author reputation" }, "rep …"),
+    ),
+  );
+  loadRepBadge(a.author);
+  return el;
+}
+
+function voteControl(argId, p, votes, mine, open, displayScore) {
+  const scoreText = displayScore !== undefined
+    ? fmtCredits(displayScore < 0n ? "0" : displayScore.toString()) + (displayScore < 0n ? "−" : "")
+    : "";
+  const up = h("button", { class: "up" + (mine && mine.direction === "up" ? " cast-up" : ""), title: "upvote", disabled: !open },
+    "▲");
+  const down = h("button", { class: "down" + (mine && mine.direction === "down" ? " cast-down" : ""), title: "downvote", disabled: !open },
+    "▼");
+  up.addEventListener("click", (e) => { e.stopPropagation(); doVote(p, argId, "up"); });
+  down.addEventListener("click", (e) => { e.stopPropagation(); doVote(p, argId, "down"); });
+  return h("span", { class: "vote" }, up, h("span", { class: "score" }, displayScore !== undefined ? scoreText : "vote"), down);
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+async function doVote(p, argId, direction) {
+  if (state.busy) return; state.busy = true;
+  try {
+    const v = await castVote(ce, {
+      proposal_id: p.id,
+      argument_id: argId || undefined,
+      direction,
+      author: Wallet.author,
+    }, Wallet.sign, { expertise_tags: p.expertise_tags || [] });
+    await announceArtifact(v, { proposal_id: p.id });
+    toast(`Vote ${direction} cast (weight ${fmtCredits(v.weight)} cr raw)`, "ok");
+    state.cache.delete(p.id);
+    await renderDetail();
+  } catch (e) {
+    toast("Vote failed: " + (e && e.message || e), "bad");
+  } finally { state.busy = false; }
+}
+
+async function finalize(ev, p) {
+  const btn = ev.target; btn.disabled = true; btn.textContent = "Finalizing…";
+  try {
+    const entry = await loadDetail(p.id, { force: true });
+    const v = await finalizeVerdict(ce, p, entry.votes, entry.args, Wallet.sign, {
+      currentHeight: state.height, allowUnsigned: true, validator,
+    });
+    await announceArtifact(v, { proposal_id: p.id });
+    toast("Verdict published: " + (v.decision === p.action ? "ENACTED" : "rejected"), "ok");
+    state.cache.delete(p.id);
+    await renderDetail();
+  } catch (e) {
+    toast("Finalize failed: " + (e && e.message || e), "bad");
+    btn.disabled = false; btn.textContent = "Finalize verdict";
+  }
+}
+
+function argumentForm(p) {
+  const f = h("div", { class: "form-card" });
+  const err = h("div", { class: "err" });
+  let kind = ARG_KIND.PROOF;
+  const proBtn = h("button", { class: "active pro", type: "button" }, "PROOF (support)");
+  const conBtn = h("button", { class: "con", type: "button" }, "ANTI-PROOF (oppose)");
+  proBtn.addEventListener("click", () => { kind = ARG_KIND.PROOF; proBtn.className = "active pro"; conBtn.className = "con"; });
+  conBtn.addEventListener("click", () => { kind = ARG_KIND.ANTIPROOF; conBtn.className = "active con"; proBtn.className = "pro"; });
+
+  const body = h("textarea", { placeholder: "State your argument. Be specific and falsifiable." });
+  const srcWrap = h("div", {});
+  function srcRow() {
+    const row = h("div", { class: "src-row" },
+      h("input", { class: "url", placeholder: "https://source-url" }),
+      h("input", { class: "title", placeholder: "source title" }),
+      h("input", { class: "trust", type: "number", min: "0", max: "100", value: "60", title: "your trust 0..100" }),
+      h("button", { type: "button", onclick: (e) => { e.target.closest(".src-row").remove(); } }, "×"),
+    );
+    return row;
+  }
+  srcWrap.appendChild(srcRow());
+
+  f.append(
+    h("h3", {}, "Submit an argument"),
+    h("div", { class: "hint" }, "At least one external source URL is required — unsourced arguments are not weighted in the tally."),
+    h("label", {}, "Side"),
+    h("div", { class: "seg" }, proBtn, conBtn),
+    h("label", {}, "Argument"), body,
+    h("label", {}, "Cited sources (≥ 1 required)"), srcWrap,
+    h("div", { style: "margin-top:6px" }, h("button", { type: "button", onclick: () => srcWrap.appendChild(srcRow()) }, "+ add source")),
+    err,
+    h("div", { class: "form-actions" },
+      h("button", { class: "primary", onclick: submit }, "Publish argument"),
+    ),
+  );
+
+  async function submit(ev) {
+    err.textContent = "";
+    const sources = [...srcWrap.querySelectorAll(".src-row")].map((r) => ({
+      url: r.querySelector(".url").value.trim(),
+      title: r.querySelector(".title").value.trim(),
+      trust: Math.max(0, Math.min(100, parseInt(r.querySelector(".trust").value, 10) || 0)),
+    })).filter((s) => s.url);
+    if (!body.value.trim()) { err.textContent = "Argument body is required."; return; }
+    if (!sources.length) { err.textContent = "At least one external source URL is required."; return; }
+    const btn = ev.target; btn.disabled = true; btn.textContent = "Publishing…";
+    try {
+      const a = await addArgument(ce, {
+        proposal_id: p.id, arg_kind: kind, body: body.value.trim(),
+        sources, author: Wallet.author,
+      }, Wallet.sign);
+      toast("Argument published: " + short(a.id), "ok");
+      state.cache.delete(p.id);
+      await renderDetail();
+    } catch (e) {
+      err.textContent = "Publish failed: " + (e && e.message || e);
+      btn.disabled = false; btn.textContent = "Publish argument";
+    }
+  }
+  return f;
+}
+
+// ---------------------------------------------------------------------------
+// Async badge decoration (reputation + AI evidence) — never blocks first paint
+// ---------------------------------------------------------------------------
+const _repCache = new Map();
+async function loadRepBadge(author) {
+  const el = document.getElementById("rep-" + author);
+  if (!el) return;
+  try {
+    let prof = _repCache.get(author);
+    if (!prof) { prof = await profile(ce, author); _repCache.set(author, prof); }
+    const cls = prof.slashes > 0 ? "bad" : prof.karma >= 30 ? "ok" : "";
+    el.className = "badge " + cls;
+    el.textContent = `karma ${prof.karma}` + (prof.slashes ? ` · ${prof.slashes} slash` : "");
+    el.title = `jobs ${prof.jobs_hosted} · earned ${fmtCredits(prof.earned)} cr · expiries ${prof.expiries}`;
+  } catch {
+    el.textContent = "rep n/a";
+  }
+}
+
+async function decorateEvidence(args) {
+  for (const a of args) {
+    const el = document.getElementById("ev-" + a.id);
+    if (!el) continue;
+    try {
+      const ev = await validator.verifyEvidence(a);
+      if (ev && ev.supported) {
+        el.className = "badge ok";
+        el.textContent = `evidence ✓ trust ${ev.sourceTrust | 0}` + (validator.available() ? " (AI)" : "");
+      } else {
+        el.className = "badge bad";
+        el.textContent = "evidence unsupported";
+      }
+      el.title = `confidence ${ev ? ev.confidence | 0 : 0}/100` + (validator.available() ? " · AI-validated" : " · deterministic");
+    } catch {
+      el.className = "badge warn";
+      el.textContent = "evidence: error";
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Boot + live updates
+// ---------------------------------------------------------------------------
+async function reload() {
+  await refreshChain();
+  if (state.view.name === "detail") {
+    state.cache.delete(state.view.id);
+    await renderDetail();
+  } else {
+    await loadList();
+    renderList();
+  }
+}
+
+async function boot() {
+  const author = await Wallet.init();
+  $("#wallet-id").textContent = short(author, 6);
+  await refreshChain();
+  // deep link to a proposal via #<id>
+  const hashId = location.hash.replace(/^#/, "");
+  if (/^[0-9a-f]{64}$/.test(hashId)) {
+    state.view = { name: "detail", id: hashId };
+    await renderDetail();
+  } else {
+    await loadList();
+    renderList();
+  }
+  // live: refresh on new governance signals + periodic height tick
+  try {
+    ce.signalsStream(() => { scheduleRefresh(); }, () => {});
+  } catch {}
+  setInterval(refreshChain, 15000);
+}
+
+let _refreshTimer = null;
+function scheduleRefresh() {
+  if (_refreshTimer) return;
+  _refreshTimer = setTimeout(async () => { _refreshTimer = null; await reload(); }, 1500);
+}
+
+boot().catch((e) => {
+  $("#app").replaceChildren(h("div", { class: "empty" },
+    "Failed to start: " + (e && e.message || e) +
+    ". Ensure a CE node HTTP API is reachable (default http://localhost:8844; override with ?api=…)."));
+});
+</script>
+</body>
+</html>

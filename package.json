@@ -1,0 +1,18 @@
+{
+  "name": "@ce-net/gov",
+  "version": "0.1.0",
+  "description": "Governance, policy, and abuse-monitoring app for CE-net. Pre-run policy scan, runtime monitoring, and reputation-weighted expert voting. Built entirely on CE primitives (HTTP API, CEP-1 signals, blobs, ce-cap, /history). Zero heavy dependencies, vanilla ES-module JavaScript.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "author": "Leif Rydenfalk <ledamecrydenfalk@gmail.com>",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "for f in src/*.js examples/*.js; do node --check \"$f\" || exit 1; done && echo 'all files OK'",
+    "selftest": "node src/reputation.js && node src/proposals.js --selftest && node src/voting.js && node src/validator.js && node src/scan.js && node src/policy.js && node src/monitor.js --selftest",
+    "examples": "node examples/propose-ban-porn.js && node examples/tally-demo.js && node examples/scan-demo.js && node examples/monitor-demo.js"
+  },
+  "dependencies": {}
+}
