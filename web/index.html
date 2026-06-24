@@ -225,7 +225,13 @@
 // ---------------------------------------------------------------------------
 // Imports — the governance modules. All logic lives there; this file is view-only.
 // ---------------------------------------------------------------------------
-import { CeClient, signalBlobStore, CeError } from "../src/ce.js";
+import { CeClient, signalBlobStore, httpBlobStore, CeError } from "../src/ce.js";
+import {
+  GOV_TOPIC, GOV_SERVICE, EV,
+  announce as meshAnnounce, fetchIndex as meshFetchIndex,
+  watchEvents as meshWatchEvents,
+  encodeJsonHex, decodeJsonHex,
+} from "../src/mesh.js";
 import {
   Amount, KIND, ARG_KIND, VOTE_DIR, DECISION, STATE,
   canonical, toHex, sha256Hex,
@@ -294,8 +300,33 @@ async function verifySig(_payload, sig /*, author */) {
 // CE client + validator + state
 // ---------------------------------------------------------------------------
 const params = new URLSearchParams(location.search);
-const ce = new CeClient({ base: params.get("api") || undefined });
-ce.blobStore = signalBlobStore(ce); // governance artifacts persist as CEP-1 signal payloads
+// Data plane: this UI talks ONLY to the page's LOCAL node (loopback http://localhost:8844,
+// or a browser-node bridge that injects window.__CE_NODE__/__CE_TOKEN__). Mutating calls
+// (blob PUT, publish) need the node's api.token; on a loopback dev node pass it via ?token=.
+// We never embed a token for, or POST to, a foreign node.
+const NODE_BASE =
+  params.get("api") || (typeof window !== "undefined" && window.__CE_NODE__) || undefined;
+const NODE_TOKEN =
+  params.get("token") || (typeof window !== "undefined" && window.__CE_TOKEN__) || undefined;
+const ce = new CeClient({ base: NODE_BASE, token: NODE_TOKEN });
+
+// MESH MODE: if the local node exposes /mesh/* + /blobs, use the real content-addressed
+// blob store and the mesh pubsub event bus (the production data plane). Otherwise fall back
+// to the legacy signal-backed store so the UI still works against an older node. Detection
+// is a cheap GET probe done once at boot (see detectMesh()); until it resolves we default to
+// the signal store, then upgrade.
+let MESH = false;
+ce.blobStore = signalBlobStore(ce);
+async function detectMesh() {
+  if (!ce.base) return false;
+  try {
+    // /mesh/messages is an OPEN GET; its presence (200) means the node speaks mesh.
+    const res = await ce.fetch(`${ce.base.replace(/\/+$/, "")}/mesh/messages`, { method: "GET" });
+    MESH = res.ok;
+  } catch { MESH = false; }
+  if (MESH) ce.blobStore = httpBlobStore(ce); // real /blobs route, mesh-replicated
+  return MESH;
+}
 
 // Evidence validator adapter. validator.js exposes validateArgument() (deterministic
 // hard layer + optional LLM escalation). voting.js's tally() and the UI badges both
@@ -330,15 +361,48 @@ const state = {
 };
 
 // ---------------------------------------------------------------------------
-// Vote + verdict discovery. proposals.js broadcasts index signals for proposals
-// and arguments, but voting.js only blob-stores votes/verdicts. So the UI both
-// (a) broadcasts an index signal when it casts a vote / finalizes a verdict, and
-// (b) scans signals for those index entries to rebuild tallies. The tag + shape
-// match proposals.js exactly (kind ∈ {vote,verdict}); its scanners ignore them.
+// Vote + verdict discovery — MESH-NATIVE with a legacy signal fallback.
+//
+// In MESH mode the UI publishes an index event { type, id, cid, height } on the gov
+// pubsub topic (src/mesh.js `announce`) when it creates a vote/verdict, and rebuilds
+// tallies from the mesh index (events received live on /mesh/messages/stream, plus a
+// one-shot fetchIndex catch-up). The event carries no proposal_id, so the predicate is
+// applied to the MATERIALIZED artifact. Without mesh it falls back to the prior
+// CEP-1-signal index (kind ∈ {vote,verdict}; tag matches proposals.js).
 // ---------------------------------------------------------------------------
+
+// Local mesh index, kept fresh by a single live watcher + lazy fetchIndex catch-up.
+// id -> { type, id, cid, height }
+const meshIndex = new Map();
+let meshFeed = null;
+function startMeshFeed() {
+  if (!MESH || meshFeed) return;
+  meshFeed = meshWatchEvents(ce, (ev) => {
+    meshIndex.set(ev.id, ev);
+    // Live UX: a brand-new proposal/verdict/policy invalidates caches + repaints.
+    onMeshEvent && onMeshEvent(ev);
+  }, { subscribe: true });
+}
+let meshCaughtUp = false;
+async function meshCatchUp() {
+  if (!MESH || meshCaughtUp) return;
+  meshCaughtUp = true;
+  try {
+    const events = await meshFetchIndex(ce);
+    for (const ev of events) meshIndex.set(ev.id, ev);
+  } catch {}
+}
+
 async function announceArtifact(artifact, extra = {}) {
   const bytes = new TextEncoder().encode(JSON.stringify(artifact));
-  const cid = await ce.putBlob(bytes);               // signalBlobStore broadcasts the blob itself
+  const cid = await ce.putBlob(bytes);
+  if (MESH) {
+    // Mesh-native: publish the index event on the governance topic. extra.height optional.
+    meshIndex.set(artifact.id, { type: artifact.kind, id: artifact.id, cid, height: extra.height | 0 });
+    try { await meshAnnounce(ce, { type: artifact.kind, id: artifact.id, cid, height: extra.height | 0 }); } catch {}
+    return cid;
+  }
+  // Legacy: broadcast a CEP-1 index signal.
   const idx = { tag: INDEX_TAG, kind: artifact.kind, id: artifact.id, cid, ...extra };
   const idxHex = toHex(new TextEncoder().encode(canonical(idx)));
   try { await ce.signalsSend({ payload_hex: idxHex, to: "broadcast" }); } catch {}
@@ -346,18 +410,27 @@ async function announceArtifact(artifact, extra = {}) {
 }
 
 async function scanArtifacts(kind, predicate) {
-  let signals = [];
-  try { signals = await ce.signals(); } catch { return []; }
-  const cids = new Set();
   const dec = new TextDecoder();
-  for (const s of signals) {
-    if (!s || !s.payload_hex) continue;
-    let obj;
-    try { obj = JSON.parse(dec.decode(hexToBytes(s.payload_hex))); } catch { continue; }
-    if (obj && obj.tag === INDEX_TAG && obj.kind === kind && typeof obj.cid === "string") {
-      if (!predicate || predicate(obj)) cids.add(obj.cid);
+  const cids = new Set();
+
+  if (MESH) {
+    await meshCatchUp();
+    for (const ev of meshIndex.values()) {
+      if (ev.type === kind && typeof ev.cid === "string") cids.add(ev.cid);
+    }
+  } else {
+    let signals = [];
+    try { signals = await ce.signals(); } catch { return []; }
+    for (const s of signals) {
+      if (!s || !s.payload_hex) continue;
+      let obj;
+      try { obj = JSON.parse(dec.decode(hexToBytes(s.payload_hex))); } catch { continue; }
+      if (obj && obj.tag === INDEX_TAG && obj.kind === kind && typeof obj.cid === "string") {
+        if (!predicate || predicate(obj)) cids.add(obj.cid);
+      }
     }
   }
+
   const out = [], seen = new Set();
   for (const cid of cids) {
     const bytes = await ce.getBlob(cid);
@@ -365,12 +438,17 @@ async function scanArtifacts(kind, predicate) {
     let art;
     try { art = JSON.parse(dec.decode(bytes)); } catch { continue; }
     if (!art || art.kind !== kind || !art.id || seen.has(art.id)) continue;
+    // In mesh mode the predicate runs on the materialized artifact (events lack proposal_id).
+    if (MESH && predicate && !predicate(art)) continue;
     if (!(await verifyArtifact(art, verifySig))) continue;
     seen.add(art.id);
     out.push(art);
   }
   return out;
 }
+
+// Optional repaint hook the boot code can set so live mesh events refresh the view.
+let onMeshEvent = null;
 
 function loadVotes(proposalId) { return scanArtifacts(KIND.VOTE, (e) => e.proposal_id === proposalId); }
 async function loadVerdict(proposalId) {
@@ -905,6 +983,13 @@ async function reload() {
 async function boot() {
   const author = await Wallet.init();
   $("#wallet-id").textContent = short(author, 6);
+
+  // Probe the LOCAL node for mesh support and, if present, switch to the mesh data plane
+  // (real /blobs + gov pubsub) and open the live event feed. Falls back to CEP-1 signals.
+  await detectMesh();
+  onMeshEvent = () => scheduleRefresh();
+  startMeshFeed();
+
   await refreshChain();
   // deep link to a proposal via #<id>
   const hashId = location.hash.replace(/^#/, "");
@@ -915,10 +1000,11 @@ async function boot() {
     await loadList();
     renderList();
   }
-  // live: refresh on new governance signals + periodic height tick
-  try {
-    ce.signalsStream(() => { scheduleRefresh(); }, () => {});
-  } catch {}
+  // live: in mesh mode the meshFeed already drives scheduleRefresh on gov events; otherwise
+  // fall back to the CEP-1 signal stream. Periodic height tick in both modes.
+  if (!MESH) {
+    try { ce.signalsStream(() => { scheduleRefresh(); }, () => {}); } catch {}
+  }
   setInterval(refreshChain, 15000);
 }
 

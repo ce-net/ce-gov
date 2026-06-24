@@ -46,6 +46,8 @@ export * from "./validator.js";
 export * from "./scan.js";
 export * from "./monitor.js";
 export * from "./policy.js";
+export * from "./mesh.js";
+export * from "./mesh-service.js";
 
 // Module namespaces. `export *` drops any name defined in two modules (e.g. both
 // scan.js and validator.js export `deterministicChecks`; scan.js and policy.js both
@@ -64,12 +66,14 @@ export {
   Scan as nsScan,
   Monitor as nsMonitor,
   Policy as nsPolicy,
+  Mesh as nsMesh,
+  MeshService as nsMeshService,
 };
 
 // Named imports the facade wires together. (Selective, to avoid name ambiguity:
 // scan.js and validator.js both export `deterministicChecks`, `__selftest`, etc.;
 // the facade refers to them through their module namespaces below.)
-import { CeClient } from "./ce.js";
+import { CeClient, httpBlobStore } from "./ce.js";
 import * as Types from "./types.js";
 import * as Reputation from "./reputation.js";
 import * as Proposals from "./proposals.js";
@@ -78,6 +82,8 @@ import * as Validator from "./validator.js";
 import * as Scan from "./scan.js";
 import * as Monitor from "./monitor.js";
 import * as Policy from "./policy.js";
+import * as Mesh from "./mesh.js";
+import * as MeshService from "./mesh-service.js";
 
 // ---------------------------------------------------------------------------
 // Evidence-validator bridge
@@ -157,6 +163,10 @@ export class Governance {
    * @param {(url:string)=>number} [opts.trustOf]           optional source-trust resolver.
    * @param {boolean} [opts.allowUnsigned]  accept unsigned votes/args in tallies (local/tests).
    * @param {string} [opts.author]          default author for self-authored artifacts.
+   * @param {boolean} [opts.mesh]           opt into the production mesh backend: store
+   *        artifacts via the node's real `/blobs` route (`httpBlobStore`). Default false so
+   *        offline examples/tests keep the in-memory blob store. Ignored if `opts.ce` already
+   *        carries a non-default `blobStore`.
    */
   constructor(opts = {}) {
     this.ce = opts.ce || new CeClient();
@@ -164,6 +174,14 @@ export class Governance {
     this.verifySig = opts.verifySig || null;
     this.allowUnsigned = !!opts.allowUnsigned;
     this.author = opts.author || null;
+    this._service = null; // mesh-service handle once start() is called
+
+    // Production mesh backend: wire the blob store to the node's real /blobs route. We only
+    // do this when explicitly asked (opts.mesh) and the ce client supports the mesh blob
+    // methods, so offline construction (no node) is never broken.
+    if (opts.mesh && this.ce && typeof this.ce.meshPutBlob === "function") {
+      this.ce.blobStore = httpBlobStore(this.ce);
+    }
 
     // One LLM adapter, shared by argument validation and artifact scanning.
     this.llm = opts.llm || Validator.makeValidatorLlm(opts);
@@ -178,6 +196,38 @@ export class Governance {
 
     // The artifact-scan classifier (scan.js Validator).
     this.scanValidator = opts.scanValidator || Scan.makeScanValidator(opts);
+  }
+
+  // ---- mesh service lifecycle --------------------------------------------
+
+  /**
+   * Start the node-side governance mesh service: advertise `ce-gov.v1` + `gov/validator` in
+   * the DHT, subscribe to the governance topics, maintain the discovery index from announced
+   * blob CIDs, and answer `index` / `get` / `validate` requests over request/reply. Reuses
+   * this facade's shared LLM/validator stack for `validate`. Idempotent (returns the existing
+   * handle if already started). Requires a node with `/mesh/*` (a mesh-capable ce client).
+   * @param {Object} [opts]  passthrough to `startGovService` (readvertiseMs, onEvent, onErr).
+   * @returns {Promise<{stop:()=>void, index:()=>object[], validate:(arg:object)=>Promise<object>, serviceNames:string[], topics:string[]}>}
+   */
+  async start(opts = {}) {
+    if (this._service) return this._service;
+    if (!this.ce || typeof this.ce.meshAdvertise !== "function") {
+      throw new TypeError("Governance.start requires a mesh-capable CE client (node with /mesh/*)");
+    }
+    this._service = await MeshService.startGovService(this.ce, {
+      llm: this.llm,
+      verifySig: this.verifySig ? (p, s, a) => this.verifySig(p, s, a) : undefined,
+      ...opts,
+    });
+    return this._service;
+  }
+
+  /** Stop the governance mesh service started by `start()`. No-op if not started. */
+  stop() {
+    if (this._service) {
+      try { this._service.stop(); } catch { /* ignore */ }
+      this._service = null;
+    }
   }
 
   // ---- node / reputation -------------------------------------------------

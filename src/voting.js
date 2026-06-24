@@ -41,6 +41,24 @@ import {
   ARG_KIND,
 } from "./types.js";
 import { profile, rawWeight } from "./reputation.js";
+import { announce as meshAnnounce, EV } from "./mesh.js";
+
+/**
+ * Announce a freshly-stored vote/verdict over the governance mesh so peers see it live and
+ * can rebuild tallies without polling. Best-effort + no-op for mesh-less clients (the cid
+ * carried by the event is the pointer; the blob is the source of truth). The blob `cid`
+ * here is the sha256 of the stored bytes, which equals what `ce.meshPutBlob` returns.
+ * @param {import("./ce.js").CeClient} ce
+ * @param {{type:string,id:string,cid:string,height?:number}} ev
+ */
+async function announceArtifact(ce, ev) {
+  if (!ce || typeof ce.meshPublish !== "function") return;
+  try {
+    await meshAnnounce(ce, ev);
+  } catch {
+    /* best-effort */
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Tunable thresholds (documented module constants)
@@ -167,12 +185,14 @@ export async function castVote(ce, fields, signer, opts = {}) {
   });
 
   const finalized = await finalize(vote, signer);
-  // Broadcast (best-effort persistence via the configured blob/signal store + signals).
+  // Persist the vote as a content-addressed blob, then announce its cid on the governance
+  // mesh topic so peers see it live and can fold it into tallies (REPLACES polling).
   try {
     const bytes = new TextEncoder().encode(JSON.stringify(finalized));
-    await ce.putBlob(bytes);
+    const cid = await ce.putBlob(bytes);
+    await announceArtifact(ce, { type: EV.VOTE, id: finalized.id, cid, height: beacon_height });
   } catch {
-    /* blob store optional; the signal below is the broadcast of record */
+    /* blob store optional; the announce is best-effort */
   }
   return finalized;
 }
@@ -444,9 +464,10 @@ export async function finalizeVerdict(ce, proposal, votes, args, signer, opts = 
   const finalized = await finalize(verdict, signer);
   try {
     const bytes = new TextEncoder().encode(JSON.stringify(finalized));
-    await ce.putBlob(bytes);
+    const cid = await ce.putBlob(bytes);
+    await announceArtifact(ce, { type: EV.VERDICT, id: finalized.id, cid, height: beacon_height });
   } catch {
-    /* persistence best-effort */
+    /* persistence + announce best-effort */
   }
   return finalized;
 }

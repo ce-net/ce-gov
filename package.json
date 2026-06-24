@@ -11,8 +11,8 @@
   },
   "scripts": {
     "check": "for f in src/*.js examples/*.js; do node --check \"$f\" || exit 1; done && echo 'all files OK'",
-    "selftest": "node src/reputation.js && node src/proposals.js --selftest && node src/voting.js && node src/validator.js && node src/scan.js && node src/policy.js && node src/monitor.js --selftest",
-    "examples": "node examples/propose-ban-porn.js && node examples/tally-demo.js && node examples/scan-demo.js && node examples/monitor-demo.js"
+    "selftest": "node src/reputation.js && node src/proposals.js --selftest && node src/voting.js && node src/validator.js && node src/scan.js && node src/policy.js && node src/monitor.js --selftest && node src/mesh.js && node src/mesh-service.js",
+    "examples": "node examples/propose-ban-porn.js && node examples/tally-demo.js && node examples/scan-demo.js && node examples/monitor-demo.js && node examples/mesh-roundtrip.js"
   },
   "dependencies": {}
 }
