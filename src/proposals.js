@@ -39,6 +39,32 @@ import {
   artifactId,
   canonical,
 } from "./types.js";
+import { announce as meshAnnounce, fetchIndex as meshFetchIndex, EV } from "./mesh.js";
+
+// A small per-client discovery index (id -> { kind, cid, proposal_id?, height }) maintained
+// locally as this process creates/observes artifacts, so loads/lists never depend on a
+// network scan. It is a CACHE/CATALOG; the blob is always the source of truth. A WeakMap
+// keyed by the ce client keeps it isolated per node and GC-friendly. Mesh announcements
+// (and, for fresh nodes, fetchIndex) refill it; the old CEP-1 signal scan is the last-resort
+// fallback for a ce client that has neither a mesh nor a populated index.
+const _localIndex = new WeakMap();
+function idx(ce) {
+  let m = _localIndex.get(ce);
+  if (!m) { m = new Map(); _localIndex.set(ce, m); }
+  return m;
+}
+/** Record a discovery entry in the local index (id -> entry). */
+function rememberEntry(ce, entry) {
+  if (entry && entry.id && entry.cid) idx(ce).set(entry.id, entry);
+}
+/** Map a mesh IndexEvent type back to a governance KIND (they share strings). */
+const EV_TO_KIND = {
+  [EV.PROPOSAL]: KIND.PROPOSAL,
+  [EV.ARGUMENT]: KIND.ARGUMENT,
+  [EV.VOTE]: KIND.VOTE,
+  [EV.VERDICT]: KIND.VERDICT,
+  [EV.POLICY]: KIND.POLICY,
+};
 
 /**
  * @typedef {import("./types.js").PolicyProposal} PolicyProposal
@@ -76,18 +102,50 @@ function fromHexLocal(hex) {
 }
 
 /**
- * Build the advisory discovery-index entry for an artifact and broadcast it as a CEP-1
- * signal. Best-effort: if the broadcast fails we still return (the blob is authoritative).
+ * Announce a new artifact to the network. The mesh-native path publishes an index event
+ * `{type,id,cid,height}` on the governance pubsub topic (src/mesh.js `announce`); this
+ * REPLACES the old "broadcast an index entry as a CEP-1 signal" cheat. The entry is also
+ * recorded in the local index so this process can resolve it immediately without any round
+ * trip. When the ce client has no mesh (e.g. the offline self-test fake), the legacy CEP-1
+ * signal broadcast is used as a fallback so nothing regresses.
  * @param {CeClient} ce
- * @param {{kind:string,id:string,proposal_id?:string,cid:string}} entry
+ * @param {{kind:string,id:string,proposal_id?:string,cid:string,height?:number}} entry
  */
 async function announceIndex(ce, entry) {
-  const payload = { tag: INDEX_TAG, ...entry };
-  const bytes = jsonBytes(payload);
+  rememberEntry(ce, entry);
+  // Mesh-native announce (pubsub) when the node exposes /mesh/publish.
+  if (ce && typeof ce.meshPublish === "function") {
+    await meshAnnounce(ce, { type: entry.kind, id: entry.id, cid: entry.cid, height: entry.height | 0 });
+    return;
+  }
+  // Fallback for mesh-less clients: the legacy CEP-1 index signal.
+  if (ce && typeof ce.signalsSend === "function") {
+    const payload = { tag: INDEX_TAG, ...entry };
+    try {
+      await ce.signalsSend({ payload_hex: toHexLocal(jsonBytes(payload)), to: "broadcast" });
+    } catch {
+      // Discovery is best-effort; the artifact is already stored as a blob.
+    }
+  }
+}
+
+/**
+ * Pull the discovery index from a peer over the mesh (request/reply to GOV_SERVICE) and
+ * fold it into the local index. Best-effort, used to catch up a fresh node. No-op when the
+ * ce client has no mesh request capability.
+ * @param {CeClient} ce
+ */
+async function refreshFromMesh(ce) {
+  if (!ce || typeof ce.meshRequest !== "function" || typeof ce.meshFind !== "function") return;
+  let events = [];
   try {
-    await ce.signalsSend({ payload_hex: toHexLocal(bytes), to: "broadcast" });
+    events = await meshFetchIndex(ce);
   } catch {
-    // Discovery is best-effort; the artifact is already stored as a blob.
+    return;
+  }
+  for (const ev of events) {
+    const kind = EV_TO_KIND[ev.type] || ev.type;
+    rememberEntry(ce, { kind, id: ev.id, cid: ev.cid, height: ev.height | 0 });
   }
 }
 
@@ -192,7 +250,7 @@ export async function createProposal(ce, fields, signer) {
   validate(finalized, PolicyProposalSchema, "proposal");
 
   const cid = await storeArtifact(ce, finalized);
-  await announceIndex(ce, { kind: KIND.PROPOSAL, id: finalized.id, cid });
+  await announceIndex(ce, { kind: KIND.PROPOSAL, id: finalized.id, cid, height: openHeight });
   return finalized;
 }
 
@@ -252,9 +310,45 @@ export async function loadProposal(ce, id) {
 }
 
 /**
- * Load all arguments attached to a proposal by scanning the discovery index for argument
- * entries whose `proposal_id` matches, then fetching + validating each blob. Results are
- * de-duplicated by argument id and sorted by timestamp (ascending).
+ * Collect discovery-index entries of a given kind for this ce client. Order of resolution:
+ *   1. the local index (entries this process created or observed on the mesh stream);
+ *   2. a mesh catch-up (`fetchIndex` from a discovered GOV_SERVICE peer) when the index is
+ *      empty / a fresh node and the client has mesh request capability;
+ *   3. the legacy CEP-1 signal scan, for mesh-less clients (offline self-test fake).
+ * Returns a de-duplicated array of `{ kind, id, cid, proposal_id?, height? }`.
+ * @param {CeClient} ce
+ * @param {string} kind
+ * @returns {Promise<Array<{kind:string,id:string,cid:string,proposal_id?:string,height?:number}>>}
+ */
+async function collectEntries(ce, kind) {
+  // 1) local index
+  let entries = [...idx(ce).values()].filter((e) => e.kind === kind);
+
+  // 2) mesh catch-up when nothing local yet
+  if (entries.length === 0 && ce && typeof ce.meshRequest === "function") {
+    await refreshFromMesh(ce);
+    entries = [...idx(ce).values()].filter((e) => e.kind === kind);
+  }
+
+  // 3) legacy signal scan fallback (mesh-less clients) — also feed the local index.
+  if (entries.length === 0 && ce && typeof ce.signals === "function" && typeof ce.meshPublish !== "function") {
+    const signals = await safeSignals(ce);
+    for (const s of signals) {
+      const entry = parseIndexSignal(s);
+      if (entry && entry.kind === kind) rememberEntry(ce, entry);
+    }
+    entries = [...idx(ce).values()].filter((e) => e.kind === kind);
+  }
+  // De-dup by id (keep last seen).
+  const byId = new Map();
+  for (const e of entries) byId.set(e.id, e);
+  return [...byId.values()];
+}
+
+/**
+ * Load all arguments attached to a proposal: collect argument index entries whose
+ * `proposal_id` matches, then fetch + validate each blob. De-duplicated by argument id,
+ * sorted by timestamp ascending.
  *
  * @param {CeClient} ce
  * @param {string} proposalId
@@ -262,18 +356,14 @@ export async function loadProposal(ce, id) {
  */
 export async function loadArguments(ce, proposalId) {
   if (!ce || typeof proposalId !== "string") return [];
-  const signals = await safeSignals(ce);
-  const byCid = new Map();
-  for (const s of signals) {
-    const entry = parseIndexSignal(s);
-    if (!entry || entry.kind !== KIND.ARGUMENT) continue;
-    if (entry.proposal_id !== proposalId) continue;
-    byCid.set(entry.cid, entry);
-  }
+  const entries = await collectEntries(ce, KIND.ARGUMENT);
   const out = [];
   const seen = new Set();
-  for (const cid of byCid.keys()) {
-    const arg = await loadArtifactByCid(ce, cid, KIND.ARGUMENT);
+  for (const entry of entries) {
+    // The local/mesh entry may not carry proposal_id; the blob is authoritative, so we
+    // filter on the materialized artifact below regardless.
+    if (entry.proposal_id && entry.proposal_id !== proposalId) continue;
+    const arg = await loadArtifactByCid(ce, entry.cid, KIND.ARGUMENT);
     if (!arg || arg.proposal_id !== proposalId) continue;
     if (arg.id && seen.has(arg.id)) continue;
     if (arg.id) seen.add(arg.id);
@@ -284,8 +374,8 @@ export async function loadArguments(ce, proposalId) {
 }
 
 /**
- * List proposals discovered via the CEP-1 index. Each entry is fetched + validated.
- * De-duplicated by proposal id, newest first (by ts). Optionally filter.
+ * List proposals discovered via the mesh index (with a signal fallback). Each entry is
+ * fetched + validated. De-duplicated by proposal id, newest first (by ts). Optionally filter.
  *
  * @param {CeClient} ce
  * @param {Object} [opts]
@@ -297,17 +387,12 @@ export async function loadArguments(ce, proposalId) {
  */
 export async function listProposals(ce, opts = {}) {
   if (!ce) return [];
-  const signals = await safeSignals(ce);
-  const cids = new Set();
-  for (const s of signals) {
-    const entry = parseIndexSignal(s);
-    if (entry && entry.kind === KIND.PROPOSAL) cids.add(entry.cid);
-  }
+  const entries = await collectEntries(ce, KIND.PROPOSAL);
 
   const out = [];
   const seen = new Set();
-  for (const cid of cids) {
-    const p = await loadArtifactByCid(ce, cid, KIND.PROPOSAL);
+  for (const entry of entries) {
+    const p = await loadArtifactByCid(ce, entry.cid, KIND.PROPOSAL);
     if (!p) continue;
     if (p.id && seen.has(p.id)) continue;
     if (p.id) seen.add(p.id);
@@ -436,17 +521,35 @@ async function safeSignals(ce) {
 }
 
 /**
- * Resolve an artifact id to a blob cid via the discovery index.
+ * Resolve an artifact id to a blob cid via the discovery index: local index first, then a
+ * mesh catch-up, then the legacy signal scan for mesh-less clients.
  * @param {CeClient} ce
  * @param {string} id
  * @param {string} kind
  * @returns {Promise<string|null>}
  */
 async function resolveCid(ce, id, kind) {
-  const signals = await safeSignals(ce);
-  for (const s of signals) {
-    const entry = parseIndexSignal(s);
-    if (entry && entry.kind === kind && entry.id === id) return entry.cid;
+  // 1) local index
+  const hit = idx(ce).get(id);
+  if (hit && hit.kind === kind && hit.cid) return hit.cid;
+
+  // 2) mesh catch-up
+  if (ce && typeof ce.meshRequest === "function") {
+    await refreshFromMesh(ce);
+    const hit2 = idx(ce).get(id);
+    if (hit2 && hit2.kind === kind && hit2.cid) return hit2.cid;
+  }
+
+  // 3) legacy signal scan (mesh-less clients)
+  if (ce && typeof ce.signals === "function" && typeof ce.meshPublish !== "function") {
+    const signals = await safeSignals(ce);
+    for (const s of signals) {
+      const entry = parseIndexSignal(s);
+      if (entry && entry.kind === kind && entry.id === id) {
+        rememberEntry(ce, entry);
+        return entry.cid;
+      }
+    }
   }
   return null;
 }

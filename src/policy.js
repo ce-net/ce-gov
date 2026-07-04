@@ -43,6 +43,9 @@ import {
   artifactId,
   fromHex,
 } from "./types.js";
+import { announce as meshAnnounce, fetchIndex as meshFetchIndex, watchEvents, EV, GOV_TOPIC } from "./mesh.js";
+
+const _dec = new TextDecoder();
 
 // ---------------------------------------------------------------------------
 // Defaults — the seed banned categories (guardian.md §5: defaults ON, overridable).
@@ -129,9 +132,18 @@ export async function enactFromVerdict(ce, verdict, proposal, signer) {
 
   const finalized = await finalize(policy, signer);
 
-  // Persist + broadcast. The blob is the content-addressed source of truth; the signal announces it.
+  // Persist + announce. The blob is the content-addressed source of truth; the mesh pubsub
+  // event announces its cid so peers re-resolve the active set live (REPLACES the CEP-1
+  // signal broadcast). Best-effort announce for mesh-less clients.
   const bytes = new TextEncoder().encode(JSON.stringify(finalized));
-  await ce.putBlob(bytes);
+  const cid = await ce.putBlob(bytes);
+  if (ce && typeof ce.meshPublish === "function") {
+    try {
+      await meshAnnounce(ce, { type: EV.POLICY, id: finalized.id, cid, height: finalized.ts | 0 });
+    } catch {
+      /* best-effort */
+    }
+  }
 
   return finalized;
 }
@@ -243,7 +255,38 @@ export async function policySetId(resolved) {
 export async function collectPolicies(ce) {
   /** @type {Policy[]} */
   const out = [];
-  if (!ce || typeof ce.signals !== "function") return out;
+  if (!ce) return out;
+
+  // Mesh-native path: discover policy index events (a GOV_SERVICE peer's index), then fetch
+  // each policy blob (DHT-resolving on a miss) and keep the valid enacted ones.
+  if (typeof ce.meshRequest === "function" && typeof ce.meshGetBlob === "function") {
+    let events = [];
+    try {
+      events = await meshFetchIndex(ce);
+    } catch {
+      events = [];
+    }
+    const seen = new Set();
+    for (const ev of events) {
+      if (ev.type !== EV.POLICY || seen.has(ev.cid)) continue;
+      seen.add(ev.cid);
+      let bytes;
+      try {
+        bytes = await ce.meshGetBlob(ev.cid);
+      } catch {
+        continue;
+      }
+      const obj = decodeBlobPolicy(bytes);
+      if (obj && obj.kind === KIND.POLICY && obj.state === STATE.ENACTED && isValid(obj, PolicySchema)) {
+        out.push(obj);
+      }
+    }
+    if (out.length > 0) return out;
+    // fall through to the signal scan only if the mesh yielded nothing (mixed deployments)
+  }
+
+  // Legacy fallback: enacted policies broadcast as CEP-1 signal payloads.
+  if (typeof ce.signals !== "function") return out;
   let list;
   try {
     list = await ce.signals();
@@ -257,6 +300,17 @@ export async function collectPolicies(ce) {
     }
   }
   return out;
+}
+
+/** Parse a Policy JSON object from raw blob bytes (mesh path). Returns null on miss. */
+function decodeBlobPolicy(bytes) {
+  if (!bytes) return null;
+  try {
+    const obj = JSON.parse(_dec.decode(bytes));
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Try to extract a Policy JSON object from a CEP-1 signal's hex payload. Returns null on miss. */
@@ -325,9 +379,14 @@ export function categoryDecision(policySet, category) {
 // ---------------------------------------------------------------------------
 
 /**
- * Watch CEP-1 signals and re-resolve the active set; invoke `cb(policySet)` whenever the
- * `policy_set_id` CHANGES (deduped). Fires once immediately with the current set, then on changes.
- * Returns an `{ close() }` handle. No-op closer if the node has no stream.
+ * Watch the governance mesh event topic and re-resolve the active set; invoke `cb(policySet)`
+ * whenever the `policy_set_id` CHANGES (deduped). Fires once immediately with the current set,
+ * then on every relevant event. Returns an `{ close() }` handle.
+ *
+ * Mesh-native path (preferred): subscribe to `GOV_TOPIC` via `ce.meshStream` and re-resolve
+ * when a `policy` or `verdict` index event arrives — REPLACES re-resolving on every CEP-1
+ * signal. Falls back to `ce.signalsStream` for a mesh-less client. No-op closer if neither
+ * stream exists.
  *
  * @param {import('./ce.js').CeClient} ce
  * @param {(policySet: ActivePolicySet) => void} cb
@@ -355,9 +414,15 @@ export function subscribe(ce, cb, opts = {}) {
   // initial resolve
   refresh();
 
-  // any new signal MIGHT be a policy enactment; cheap to re-resolve (bounded window).
   let handle = { close() {} };
-  if (ce && typeof ce.signalsStream === "function") {
+  if (ce && typeof ce.meshStream === "function") {
+    // Re-resolve only when a policy/verdict event lands on the governance topic.
+    handle = watchEvents(
+      ce,
+      (ev) => { if (ev.type === EV.POLICY || ev.type === EV.VERDICT) refresh(); },
+      { onErr: opts.onErr },
+    );
+  } else if (ce && typeof ce.signalsStream === "function") {
     handle = ce.signalsStream(() => { refresh(); }, opts.onErr);
   }
 

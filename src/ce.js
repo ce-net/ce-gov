@@ -175,6 +175,169 @@ export class CeClient {
 
   /** Fetch bytes by content id, or null if absent. @param {string} cid */
   async getBlob(cid) { return this.blobStore.get(cid); }
+
+  // ---- mesh: content-addressed blobs over the node /blobs route -----------
+  //
+  // These hit the node's REAL blob route directly (raw byte bodies, NOT JSON),
+  // independent of the pluggable `blobStore` above. `httpBlobStore(ce)` wraps
+  // them so the rest of the app can stay store-agnostic.
+
+  /**
+   * POST /blobs with a raw byte body. Returns the content id (64-hex sha256).
+   * @param {Uint8Array} bytes
+   * @returns {Promise<string>} cid
+   */
+  async meshPutBlob(bytes) {
+    const body = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const headers = {};
+    if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
+    const res = await this.fetch(`${this.base}/blobs`, { method: "POST", headers, body });
+    if (!res.ok) throw new CeError("POST /blobs", res.status, await safeText(res));
+    const j = await res.json();
+    return j && j.hash;
+  }
+
+  /**
+   * GET /blobs/:cid. Returns the raw bytes, or null on 404. The node DHT-resolves
+   * on a local miss and verifies the bytes against the hash before returning them.
+   * @param {string} cid 64-hex
+   * @returns {Promise<Uint8Array|null>}
+   */
+  async meshGetBlob(cid) {
+    const res = await this.fetch(`${this.base}/blobs/${cid}`, { method: "GET" });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new CeError(`GET /blobs/${cid}`, res.status, await safeText(res));
+    const buf = await res.arrayBuffer();
+    return new Uint8Array(buf);
+  }
+
+  // ---- mesh: pub/sub (the live event bus) --------------------------------
+
+  /**
+   * POST /mesh/publish. Signs + auto-subscribes + gossips the message on `topic`.
+   * @param {string} topic
+   * @param {string} payload_hex
+   * @returns {Promise<{status:string}>}
+   */
+  async meshPublish(topic, payload_hex) {
+    return this._post("/mesh/publish", { topic, payload_hex });
+  }
+
+  /**
+   * POST /mesh/subscribe. Idempotent; the subscription lasts the node lifetime.
+   * @param {string} topic
+   * @returns {Promise<{status:string}>}
+   */
+  async meshSubscribe(topic) {
+    return this._post("/mesh/subscribe", { topic });
+  }
+
+  // ---- mesh: directed send / request / reply -----------------------------
+
+  /**
+   * POST /mesh/send. Fire-and-forget directed message to a peer.
+   * @param {string} to 64-hex node id
+   * @param {string} topic
+   * @param {string} payload_hex
+   * @returns {Promise<{status:string}>}
+   */
+  async meshSend(to, topic, payload_hex) {
+    return this._post("/mesh/send", { to, topic, payload_hex });
+  }
+
+  /**
+   * POST /mesh/request. Sends a request and BLOCKS until the peer replies (or timeout).
+   * @param {string} to 64-hex node id
+   * @param {string} topic
+   * @param {string} payload_hex
+   * @param {number} [timeout_ms=30000]
+   * @returns {Promise<{payload_hex:string}>}
+   */
+  async meshRequest(to, topic, payload_hex, timeout_ms) {
+    const body = { to, topic, payload_hex };
+    if (timeout_ms !== undefined) body.timeout_ms = timeout_ms | 0;
+    return this._post("/mesh/request", body);
+  }
+
+  /**
+   * POST /mesh/reply. Answer an inbound /mesh/request by its reply_token.
+   * @param {number} token  the inbound AppMessage.reply_token
+   * @param {string} payload_hex
+   * @returns {Promise<{status:string}>}
+   */
+  async meshReply(token, payload_hex) {
+    return this._post("/mesh/reply", { token, payload_hex });
+  }
+
+  /** GET /mesh/messages -> snapshot ring of recent AppMessages. */
+  async meshMessages() { return this._get("/mesh/messages"); }
+
+  /**
+   * GET /mesh/messages/stream (SSE). Calls `onMsg(appMessage)` for every inbound
+   * message — directed sends, requests (with `reply_token`), and pubsub events all
+   * arrive here. Reuses the same Node/browser SSE parsing as `signalsStream`.
+   * @param {(m: {from:string,topic:string,payload_hex:string,received_at:number,reply_token?:number}) => void} onMsg
+   * @param {(err: Error) => void} [onErr]
+   * @returns {{ close(): void }}
+   */
+  meshStream(onMsg, onErr) {
+    const url = `${this.base}/mesh/messages/stream`;
+    if (typeof EventSource !== "undefined") {
+      const es = new EventSource(url);
+      es.onmessage = (e) => { try { onMsg(JSON.parse(e.data)); } catch (err) { onErr && onErr(err); } };
+      es.onerror = () => { onErr && onErr(new Error("SSE error")); };
+      return { close: () => es.close() };
+    }
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await this.fetch(url, { signal: controller.signal, headers: { Accept: "text/event-stream" } });
+        if (!res.ok || !res.body) throw new CeError("GET /mesh/messages/stream", res.status, "");
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n\n")) >= 0) {
+            const frame = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            for (const line of frame.split("\n")) {
+              if (line.startsWith("data:")) {
+                try { onMsg(JSON.parse(line.slice(5).trim())); } catch (err) { onErr && onErr(err); }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") onErr && onErr(err);
+      }
+    })();
+    return { close: () => controller.abort() };
+  }
+
+  // ---- mesh: service discovery (DHT) -------------------------------------
+
+  /**
+   * POST /discovery/advertise. Become a provider of `service` in the DHT. Records
+   * expire, so re-call periodically (mesh.js / mesh-service.js run a re-advertise loop).
+   * @param {string} service
+   * @returns {Promise<{status:string}>}
+   */
+  async meshAdvertise(service) {
+    return this._post("/discovery/advertise", { service });
+  }
+
+  /**
+   * GET /discovery/find/:service -> { service, providers:[64hex] }.
+   * @param {string} service
+   * @returns {Promise<{service:string, providers:string[]}>}
+   */
+  async meshFind(service) {
+    return this._get(`/discovery/find/${encodeURIComponent(service)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +398,51 @@ export function signalBlobStore(ce) {
         if ((await sha256Hex(bytes)) === cid) return bytes;
       }
       return null;
+    },
+  };
+}
+
+/**
+ * Real content-addressed blob store over the node's `/blobs` route (the production
+ * backend). `put` POSTs raw bytes and returns the node-computed sha256 cid; `get`
+ * GETs by cid (the node DHT-resolves + verifies on a local miss). This is the
+ * mesh-native replacement for `memoryBlobStore`/`signalBlobStore` — pass it as
+ * `blobStore` to go live, e.g. `new CeClient({ base, token, blobStore: httpBlobStore(...) })`.
+ * The argument may be the partially-built CeClient (mesh methods are bound) — to avoid
+ * a constructor ordering hazard, accept either a `{ meshPutBlob, meshGetBlob }` carrier
+ * or a `{ base, token, fetch }` config and dial `/blobs` directly.
+ * @param {CeClient | {base?:string, token?:string, fetch?:typeof fetch}} ceOrCfg
+ * @returns {BlobStore}
+ */
+export function httpBlobStore(ceOrCfg) {
+  const hasMethods =
+    ceOrCfg && typeof ceOrCfg.meshPutBlob === "function" && typeof ceOrCfg.meshGetBlob === "function";
+  if (hasMethods) {
+    return {
+      async put(bytes) { return ceOrCfg.meshPutBlob(bytes); },
+      async get(cid) { return ceOrCfg.meshGetBlob(cid); },
+    };
+  }
+  const env = (typeof process !== "undefined" && process.env) || {};
+  const base = (ceOrCfg.base || env.CE_API || DEFAULT_BASE).replace(/\/+$/, "");
+  const token = ceOrCfg.token || env.CE_API_TOKEN || null;
+  const f = ceOrCfg.fetch || globalThis.fetch;
+  if (!f) throw new Error("httpBlobStore: no fetch available; pass fetch");
+  return {
+    async put(bytes) {
+      const body = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      const headers = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await f(`${base}/blobs`, { method: "POST", headers, body });
+      if (!res.ok) throw new CeError("POST /blobs", res.status, await safeText(res));
+      const j = await res.json();
+      return j && j.hash;
+    },
+    async get(cid) {
+      const res = await f(`${base}/blobs/${cid}`, { method: "GET" });
+      if (res.status === 404) return null;
+      if (!res.ok) throw new CeError(`GET /blobs/${cid}`, res.status, await safeText(res));
+      return new Uint8Array(await res.arrayBuffer());
     },
   };
 }
